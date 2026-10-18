@@ -59,6 +59,24 @@ const gateDetails: Record<GateType, { name: string; description: string; factor?
   },
 }
 
+const glossary = [
+  ['Qubit', 'The quantum version of a bit. It can be 0, 1, or a superposition of both.'],
+  ['Gate', 'An operation that changes one or more qubits.'],
+  ['Superposition', 'A combination of possible states before measurement.'],
+  ['Entanglement', 'A connection between qubits whose measurement results become correlated.'],
+  ['Amplitude', 'A number that describes the weight and phase of a possible state.'],
+  ['Phase', 'The angle or sign of an amplitude. Phase controls how states interfere.'],
+  ['Measurement', 'The act of sampling a classical result from the quantum state.'],
+]
+
+const guideSteps = [
+  ['Begin with |00⟩', 'Every qubit starts at 0. Press Clear if the circuit contains gates.'],
+  ['Create superposition', 'Drag an H gate onto q0 in Column 1. q0 will become 50% zero and 50% one.'],
+  ['Create entanglement', 'Drag Controlled X onto q0 in Column 2. It connects q0 to q1.'],
+  ['Explore each step', 'Use Previous and Next. Compare the state before and after each gate.'],
+  ['Measure the circuit', 'Press Measure once, then Run 100 to see how probabilities become experimental counts.'],
+]
+
 function zeroState(qubits: number): Complex[] {
   return Array.from({ length: 2 ** qubits }, (_, index) => ({ re: index === 0 ? 1 : 0, im: 0 }))
 }
@@ -133,6 +151,12 @@ function App() {
   const [box, setBox] = useState<Box | null>(null)
   const [menu, setMenu] = useState<{ column: number; x: number; y: number } | null>(null)
   const [measurement, setMeasurement] = useState<string | null>(null)
+  const [measurementHistory, setMeasurementHistory] = useState<string[]>([])
+  const [undoStack, setUndoStack] = useState<(Gate | null)[][]>([])
+  const [redoStack, setRedoStack] = useState<(Gate | null)[][]>([])
+  const [guideMode, setGuideMode] = useState(false)
+  const [guideIndex, setGuideIndex] = useState(0)
+  const [glossaryOpen, setGlossaryOpen] = useState(false)
   const gridRef = useRef<HTMLDivElement>(null)
 
   const previewCircuit = useMemo(() => {
@@ -160,7 +184,37 @@ function App() {
   const [explanationTitle, explanationBody] = describe(displayStep ? previewCircuit[displayStep - 1] : null, displayStep)
   const measuredIndex = measurement ? Number.parseInt(measurement, 2) : 0
   const measuredProbability = measurement ? probability(finalState[measuredIndex]) : 0
-  const possibleOutcomes = finalState.filter((value) => probability(value) > .0001).length
+  const meaningfulSteps = useMemo(() => [0, ...circuit.flatMap((gate, index) => gate ? [index + 1] : [])], [circuit])
+  const stepPosition = meaningfulSteps.indexOf(step)
+  const measurementCounts = useMemo(() => measurementHistory.reduce<Record<string, number>>((counts, result) => {
+    counts[result] = (counts[result] || 0) + 1
+    return counts
+  }, {}), [measurementHistory])
+
+  function commitCircuit(update: (current: (Gate | null)[]) => (Gate | null)[]) {
+    setCircuit((current) => {
+      const next = update(current)
+      if (next === current) return current
+      setUndoStack((history) => [...history.slice(-39), current])
+      setRedoStack([])
+      return next
+    })
+    setMeasurement(null); setMeasurementHistory([])
+  }
+
+  function undo() {
+    if (!undoStack.length) return
+    const previous = undoStack[undoStack.length - 1]
+    setUndoStack((history) => history.slice(0, -1)); setRedoStack((history) => [circuit, ...history])
+    setCircuit(previous); setStep((current) => Math.min(current, previous.length)); setSelected(new Set()); setMeasurement(null); setMeasurementHistory([])
+  }
+
+  function redo() {
+    if (!redoStack.length) return
+    const next = redoStack[0]
+    setRedoStack((history) => history.slice(1)); setUndoStack((history) => [...history, circuit])
+    setCircuit(next); setStep((current) => Math.min(current, next.length)); setSelected(new Set()); setMeasurement(null); setMeasurementHistory([])
+  }
 
   useEffect(() => {
     function keyDown(event: KeyboardEvent) {
@@ -170,7 +224,7 @@ function App() {
       if (key === 'C') setHeldKey('CNOT')
       if ((event.key === 'Delete' || event.key === 'Backspace') && selected.size) {
         event.preventDefault()
-        setCircuit((current) => current.map((gate, index) => selected.has(index) ? null : gate))
+        commitCircuit((current) => current.map((gate, index) => selected.has(index) ? null : gate))
         setSelected(new Set())
       }
       if (event.key === 'Escape') { setSelected(new Set()); setMenu(null); setTool('SELECT') }
@@ -194,7 +248,7 @@ function App() {
       else setSelected(new Set())
       setStep(column + 1); return
     }
-    setCircuit((current) => current.map((gate, index) => index === column ? activeTool === 'ERASE' ? null : makeGate(activeTool, row) : gate))
+    commitCircuit((current) => current.map((gate, index) => index === column ? activeTool === 'ERASE' ? null : makeGate(activeTool, row) : gate))
     setSelected(activeTool === 'ERASE' ? new Set() : new Set([column])); setStep(column + 1); setMeasurement(null)
   }
 
@@ -214,7 +268,7 @@ function App() {
     if (!gate && type) gate = makeGate(type, row)
     if (!gate) return
     const moved = gate.type === 'CNOT' ? { ...gate, control: row, target: row === qubits - 1 ? row - 1 : row + 1 } : { ...gate, target: row }
-    setCircuit((current) => current.map((value, index) => index === column ? moved : index === source && source !== column ? null : value))
+    commitCircuit((current) => current.map((value, index) => index === column ? moved : index === source && source !== column ? null : value))
     setStep(column + 1); setSelected(new Set([column])); endDrag()
   }
 
@@ -231,7 +285,7 @@ function App() {
     const gate = circuit[dragSource]
     if (gate) {
       const moved = gate.type === 'CNOT' ? { ...gate, control: row, target: row === qubits - 1 ? row - 1 : row + 1 } : { ...gate, target: row }
-      setCircuit((current) => current.map((value, index) => index === column ? moved : index === dragSource && dragSource !== column ? null : value))
+      commitCircuit((current) => current.map((value, index) => index === column ? moved : index === dragSource && dragSource !== column ? null : value))
       setStep(column + 1); setSelected(new Set([column]))
     }
     endDrag()
@@ -275,14 +329,14 @@ function App() {
   function resizeQubits(delta: number) {
     const next = Math.min(MAX_QUBITS, Math.max(MIN_QUBITS, qubits + delta))
     setQubits(next)
-    setCircuit((current) => current.map((gate) => gate && (gate.target >= next || (gate.control ?? 0) >= next) ? null : gate))
+    commitCircuit((current) => current.map((gate) => gate && (gate.target >= next || (gate.control ?? 0) >= next) ? null : gate))
     setSelected(new Set()); setMeasurement(null)
   }
 
   function resizeColumns(delta: number) {
     const nextLength = Math.min(MAX_COLUMNS, Math.max(MIN_COLUMNS, circuit.length + delta))
     if (nextLength === circuit.length) return
-    setCircuit((current) => nextLength > current.length
+    commitCircuit((current) => nextLength > current.length
       ? [...current, ...Array(nextLength - current.length).fill(null)]
       : current.slice(0, nextLength))
     setStep((current) => Math.min(current, nextLength))
@@ -290,39 +344,58 @@ function App() {
     setMeasurement(null)
   }
 
-  function measure() {
+  function sampleMeasurement() {
     let random = Math.random(); let result = 0
     for (let index = 0; index < finalState.length; index += 1) { random -= probability(finalState[index]) / 100; if (random <= 0) { result = index; break } }
-    setMeasurement(label(result, qubits)); setStep(circuit.length)
+    return label(result, qubits)
+  }
+
+  function measure() {
+    const result = sampleMeasurement()
+    setMeasurement(result); setMeasurementHistory((history) => [...history, result]); setStep(meaningfulSteps[meaningfulSteps.length - 1])
+  }
+
+  function measureMany(amount: number) {
+    const results = Array.from({ length: amount }, sampleMeasurement)
+    setMeasurement(results[results.length - 1]); setMeasurementHistory((history) => [...history, ...results]); setStep(meaningfulSteps[meaningfulSteps.length - 1])
+  }
+
+  function startGuide() {
+    setGuideMode(true); setGuideIndex(0); setQubits(2); setStep(0); setSelected(new Set()); setMeasurement(null); setMeasurementHistory([])
+    commitCircuit(() => Array(6).fill(null))
   }
 
   const boxStyle = box ? { left: Math.min(box.x1, box.x2), top: Math.min(box.y1, box.y2), width: Math.abs(box.x2 - box.x1), height: Math.abs(box.y2 - box.y1) } : undefined
 
   return <main onClick={() => menu && setMenu(null)}>
-    <header className="site-header"><div className="wordmark"><span>Q</span> Circuit Lab</div><p>State-vector simulator</p><button onClick={() => { setCircuit(initialCircuit); setQubits(3); setStep(0); setSelected(new Set()); setMeasurement(null) }}>Load full example</button></header>
-    <section className="page-heading"><div><h1>Build a quantum circuit</h1><p>Drag gates onto wires. Use the timeline to inspect the state after every operation.</p></div><div className="size-controls"><span>{qubits} qubits · {circuit.length} columns</span><button onClick={() => resizeQubits(-1)} disabled={qubits === MIN_QUBITS}>− q</button><button onClick={() => resizeQubits(1)} disabled={qubits === MAX_QUBITS}>+ q</button><button onClick={() => resizeColumns(-2)} disabled={circuit.length === MIN_COLUMNS}>− columns</button><button onClick={() => resizeColumns(2)} disabled={circuit.length === MAX_COLUMNS}>+ columns</button></div></section>
+    <header className="site-header"><div className="wordmark"><span><i>•</i><i>•</i><b>⌣</b></span> Quantum Circuit Simulation</div><div className="header-actions"><button onClick={() => setGlossaryOpen((open) => !open)}>Glossary</button><button onClick={startGuide}>Guided lesson</button><button onClick={() => { commitCircuit(() => initialCircuit); setQubits(3); setStep(0); setSelected(new Set()); setGuideMode(false) }}>Load full example</button></div></header>
+    <section className="page-heading"><div className="heading-copy"><h1>Build a Quantum Circuit</h1><p>Pick up a gate, drop it on a wire, and watch the quantum state change!</p></div><div className="quantum-mascot" aria-hidden="true"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="mascot-face"><i>•</i><i>•</i><b>⌣</b></div><span className="spark spark-one">✦</span><span className="spark spark-two">✦</span></div><div className="size-controls"><span>{qubits} qubits · {circuit.length} columns</span><button onClick={() => resizeQubits(-1)} disabled={qubits === MIN_QUBITS}>− q</button><button onClick={() => resizeQubits(1)} disabled={qubits === MAX_QUBITS}>+ q</button><button onClick={() => resizeColumns(-2)} disabled={circuit.length === MIN_COLUMNS}>− columns</button><button onClick={() => resizeColumns(2)} disabled={circuit.length === MAX_COLUMNS}>+ columns</button></div></section>
+
+    {glossaryOpen && <section className="glossary-panel"><div className="panel-title"><div><span>QUICK REFERENCE</span><h2>Quantum Glossary</h2></div><button onClick={() => setGlossaryOpen(false)}>Close</button></div><div className="glossary-grid">{glossary.map(([term, definition]) => <div key={term}><strong>{term}</strong><p>{definition}</p></div>)}</div></section>}
+    {guideMode && <section className="guide-panel"><div className="guide-progress">{guideSteps.map((_, index) => <i key={index} className={index <= guideIndex ? 'complete' : ''}>{index + 1}</i>)}</div><div><span>GUIDED LESSON · STEP {guideIndex + 1}</span><h2>{guideSteps[guideIndex][0]}</h2><p>{guideSteps[guideIndex][1]}</p></div><div className="guide-buttons"><button onClick={() => setGuideIndex((index) => Math.max(0, index - 1))} disabled={!guideIndex}>Back</button><button onClick={() => setGuideIndex((index) => Math.min(guideSteps.length - 1, index + 1))} disabled={guideIndex === guideSteps.length - 1}>Next instruction</button><button onClick={() => setGuideMode(false)}>Exit lesson</button></div></section>}
 
     <section className="builder-panel">
       <aside className="toolbox"><div className="toolbox-label"><strong>Toolbox</strong><span>Drag a gate onto a wire</span></div>
-        <div className="tool-group-label">Edit</div><button className={tool === 'SELECT' ? 'active' : ''} onClick={() => setTool('SELECT')}><strong>↖</strong><span>Select</span></button>
-        <div className="tool-group-label">Gates</div>
-        {(['H', 'X', 'Z', 'CNOT'] as GateType[]).map((type) => {
-          const details = gateDetails[type]
-          return <button key={type} draggable aria-label={`${type}: ${gateHelp[type]}`} aria-describedby={`gate-help-${type}`} onDragStart={(e) => beginDrag(e, type, null)} onDragEnd={endDrag} className={`tool-gate ${tool === type ? 'active' : ''}`} onClick={() => setTool(type)}>
-            <strong>{type === 'CNOT' ? '●' : type}</strong><span>{type === 'H' ? 'Hadamard' : type === 'X' ? 'Bit flip' : type === 'Z' ? 'Phase flip' : 'Controlled X'}</span>
-            <div className="gate-help-card" id={`gate-help-${type}`} role="tooltip">
-              <div className="gate-help-heading"><b>{details.name}</b><code>{type === 'CNOT' ? '●—⊕' : type}</code></div>
-              <p>{details.description}</p>
-              <div className="matrix-section"><span>Matrix</span><div className="matrix-wrap">{details.factor && <i>{details.factor}</i>}<div className={`matrix matrix-${details.matrix.length}`}>{details.matrix.flat().map((value, index) => <code key={index}>{value}</code>)}</div></div></div>
-              <div className="gate-example"><span>Example</span><code>{details.example}</code></div>
-            </div>
-          </button>
-        })}
-        <button className={tool === 'ERASE' ? 'active erase' : 'erase'} onClick={() => setTool('ERASE')}><strong>×</strong><span>Remove</span></button>
+        <div className="tool-section"><div className="tool-group-label">Edit</div><div className="tool-buttons"><button className={tool === 'SELECT' ? 'active' : ''} onClick={() => setTool('SELECT')}><strong>↖</strong><span>Select</span></button><button className={tool === 'ERASE' ? 'active erase' : 'erase'} onClick={() => setTool('ERASE')}><strong>×</strong><span>Remove</span></button></div></div>
+        <div className="tool-section"><div className="tool-group-label">Gates</div><div className="tool-buttons">
+          {(['H', 'X', 'Z', 'CNOT'] as GateType[]).map((type) => {
+            const details = gateDetails[type]
+            return <button key={type} draggable aria-label={`${type}: ${gateHelp[type]}`} aria-describedby={`gate-help-${type}`} onDragStart={(e) => beginDrag(e, type, null)} onDragEnd={endDrag} className={`tool-gate ${tool === type ? 'active' : ''}`} onClick={() => setTool(type)}>
+              <strong>{type === 'CNOT' ? '●' : type}</strong><span>{type === 'H' ? 'Hadamard' : type === 'X' ? 'Bit flip' : type === 'Z' ? 'Phase flip' : 'Controlled X'}</span>
+              <div className="gate-help-card" id={`gate-help-${type}`} role="tooltip">
+                <div className="gate-help-heading"><b>{details.name}</b><code>{type === 'CNOT' ? '●—⊕' : type}</code></div>
+                <p>{details.description}</p>
+                <div className="matrix-section"><span>Matrix</span><div className="matrix-wrap">{details.factor && <i>{details.factor}</i>}<div className={`matrix matrix-${details.matrix.length}`}>{details.matrix.flat().map((value, index) => <code key={index}>{value}</code>)}</div></div></div>
+                <div className="gate-example"><span>Example</span><code>{details.example}</code></div>
+              </div>
+            </button>
+          })}
+        </div></div>
+        <div className="toolbox-shortcuts"><b>Shortcuts</b><span><kbd>H</kbd><kbd>X</kbd><kbd>Z</kbd><kbd>C</kbd> + click to place</span><span><kbd>Del</kbd> remove selected</span><span>Drag → enclosed · Drag ← touched</span></div>
       </aside>
 
       <div className="circuit-area">
-        <div className="circuit-help"><span>{isPreviewing ? 'Previewing state at drop position' : heldKey ? `${heldKey} shortcut active — click to place` : 'Drag to build · middle-drag to move · right-click to rename'}</span><button onClick={() => { setCircuit(Array(circuit.length).fill(null)); setSelected(new Set()); setStep(0) }}>Clear</button></div>
+        <div className="circuit-help"><span>{isPreviewing ? 'Previewing state at drop position' : heldKey ? `${heldKey} shortcut active — click to place` : 'Drag to build · middle-drag to move · right-click to rename'}</span><div><button onClick={undo} disabled={!undoStack.length}>Undo</button><button onClick={redo} disabled={!redoStack.length}>Redo</button><button onClick={() => { commitCircuit(() => Array(circuit.length).fill(null)); setSelected(new Set()); setStep(0) }}>Clear</button></div></div>
         <div ref={gridRef} className={`circuit-grid ${isPreviewing ? 'previewing' : ''}`} style={{ gridTemplateColumns: `64px repeat(${circuit.length}, minmax(66px, 1fr)) 52px`, height: qubits * 64 + 70 }} onMouseDown={startBox} onMouseMove={moveBox} onMouseUp={endBox} onMouseLeave={() => box && endBox()}>
           {Array.from({ length: qubits }, (_, row) => <div key={`label-${row}`} className="row-name" style={{ top: row * 64 + 31 }}><strong>q{row}</strong><span>|0⟩</span></div>)}
           {Array.from({ length: qubits }, (_, row) => <div key={`wire-${row}`} className="wire" style={{ top: row * 64 + 40 }} />)}
@@ -340,19 +413,19 @@ function App() {
           {Array.from({ length: qubits }, (_, row) => <div key={`m-${row}`} className="measurement" style={{ top: row * 64 + 16 }}><strong>M</strong><span>P(1) {qubitProbabilities[row].toFixed(0)}%</span></div>)}
           {box && <div className={`selection-box ${box.x2 < box.x1 ? 'crossing' : ''}`} style={boxStyle} />}
         </div>
-        <div className="circuit-footer"><button onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={!step}>← Previous</button><input aria-label="Circuit step" type="range" min="0" max={circuit.length} value={step} onChange={(e) => setStep(Number(e.target.value))}/><span>Step {step} / {circuit.length}</span><button onClick={() => setStep((s) => Math.min(circuit.length, s + 1))} disabled={step === circuit.length}>Next →</button></div>
+        <div className="circuit-footer"><button onClick={() => setStep(meaningfulSteps[Math.max(0, (stepPosition < 0 ? meaningfulSteps.findIndex((value) => value > step) : stepPosition) - 1)])} disabled={step <= meaningfulSteps[0]}>← Previous</button><input aria-label="Circuit step" type="range" min="0" max={meaningfulSteps.length - 1} value={Math.max(0, stepPosition)} onChange={(e) => setStep(meaningfulSteps[Number(e.target.value)])}/><span>{stepPosition < 0 ? `Empty column ${step}` : `Step ${stepPosition} / ${meaningfulSteps.length - 1}`}</span><button onClick={() => { const next = meaningfulSteps.find((value) => value > step); if (next !== undefined) setStep(next) }} disabled={!meaningfulSteps.some((value) => value > step)}>Next →</button></div>
       </div>
     </section>
 
     <section className="readout-grid">
-      <article className="explanation"><div className="section-label">{isPreviewing ? `PREVIEWING STEP ${displayStep}` : `STEP ${step}`}</div><h2>{explanationTitle}</h2><p>{explanationBody}</p><div className="shortcuts"><strong>Shortcuts</strong><span>Hold H, X, Z, or C and click to place</span><span>Delete removes selected gates</span><span>Drag → encloses · Drag ← touches</span></div></article>
-      <article className="probabilities"><div className="article-heading"><div><div className="section-label">{isPreviewing ? 'LIVE DRAG PREVIEW' : 'STATE AT THIS STEP'}</div><h2>Most likely outcomes</h2></div><span>{2 ** qubits} basis states</span></div><div className="bars">{rows.slice(0, 8).map(({ index, p }) => <div className="bar-row" key={index}><code>|{label(index, qubits)}⟩</code><div className="bar-track"><i style={{ width: `${p}%` }} /></div><strong>{p.toFixed(1)}%</strong></div>)}</div></article>
-      <article className="state-vector"><div className="section-label">AMPLITUDES</div><h2>State vector</h2><div className="vector-table">{rows.filter((row) => row.p > .0001).slice(0, 10).map(({ index, value, p }) => <div key={index}><code>|{label(index, qubits)}⟩</code><code>{amplitude(value)}</code><small>{p.toFixed(1)}%</small></div>)}</div>{rows.filter((row) => row.p > .0001).length > 10 && <p className="more-states">Showing 10 non-zero states</p>}</article>
+      <article className="explanation"><div className="section-label">{isPreviewing ? `PREVIEWING STEP ${displayStep}` : `STEP ${Math.max(0, stepPosition)}`}</div><h2>{explanationTitle}</h2><p>{explanationBody}</p>{step > 0 && circuit[step - 1] && <div className="before-after"><strong>State Change</strong><div><section><small>BEFORE</small><span>{runCircuit(circuit, step - 1, qubits).map(probability).map((p, index) => p > .01 ? `|${label(index, qubits)}⟩ ${p.toFixed(0)}%` : '').filter(Boolean).slice(0, 2).join('  ·  ')}</span></section><b>↓</b><section><small>AFTER</small><span>{state.map(probability).map((p, index) => p > .01 ? `|${label(index, qubits)}⟩ ${p.toFixed(0)}%` : '').filter(Boolean).slice(0, 2).join('  ·  ')}</span></section></div></div>}</article>
+      <article className="probabilities"><div className="article-heading"><div><div className="section-label">{isPreviewing ? 'LIVE DRAG PREVIEW' : 'STATE AT THIS STEP'}</div><h2>Most Likely Outcomes</h2></div><span>{2 ** qubits} basis states</span></div><div className="bars">{rows.slice(0, 8).map(({ index, p }) => <div className="bar-row" key={index}><code>|{label(index, qubits)}⟩</code><div className="bar-track"><i style={{ width: `${p}%` }} /></div><strong>{p.toFixed(1)}%</strong></div>)}</div></article>
+      <article className="state-vector"><div className="section-label">AMPLITUDES & PHASE</div><h2>State Vector</h2><div className="phase-key"><span>→ 0° positive</span><span>← 180° negative</span></div><div className="vector-table">{rows.filter((row) => row.p > .0001).slice(0, 10).map(({ index, value, p }) => { const phase = Math.round(Math.atan2(value.im, value.re) * 180 / Math.PI); return <div key={index}><code>|{label(index, qubits)}⟩</code><code>{amplitude(value)}</code><span className="phase-arrow" style={{ transform: `rotate(${phase}deg)` }}>→</span><small>{phase}° · {p.toFixed(1)}%</small></div> })}</div>{rows.filter((row) => row.p > .0001).length > 10 && <p className="more-states">Showing 10 non-zero states</p>}</article>
     </section>
 
-    <section className="measure-panel"><div className="measure-intro"><h2>Measurement</h2><p>Sample one result from the completed circuit.</p></div>{measurement && <div className="measurement-answer"><div className="measured-result"><span>Result</span><strong>|{measurement}⟩</strong><b>{measuredProbability.toFixed(1)}% chance</b></div><p><strong>Why this result?</strong> The final quantum state assigned |{measurement}⟩ a {measuredProbability.toFixed(1)}% probability. Measurement randomly selected it from {possibleOutcomes} possible {possibleOutcomes === 1 ? 'outcome' : 'outcomes'} and collapsed the simulated state. Reading left to right, {measurement.split('').map((bit, index) => `q${index}=${bit}`).join(', ')}.</p></div>}<button onClick={measure}>Measure once</button></section>
+    <section className="measure-panel"><div className="measure-intro"><h2>Measurement</h2><p>Sample the completed circuit once or repeat it to see the pattern.</p></div>{measurement && <div className="measurement-answer"><div className="measured-result"><span>Latest measurement</span><strong>|{measurement}⟩</strong><b>Expected: {measuredProbability.toFixed(1)}%</b></div><div className="result-details"><span><strong>Qubit reading</strong>{measurement.split('').map((bit, index) => `q${index}=${bit}`).join(' · ')}</span><span><strong>Total trials</strong>{measurementHistory.length}</span></div>{measurementHistory.length > 1 && <div className="history-chart"><h3>Observed Results</h3>{Object.entries(measurementCounts).sort().map(([result, count]) => <div key={result}><code>|{result}⟩</code><span><i style={{ width: `${count / measurementHistory.length * 100}%` }}/></span><b>{count} / {measurementHistory.length} ({(count / measurementHistory.length * 100).toFixed(0)}%)</b></div>)}</div>}</div>}<div className="measure-actions"><button onClick={measure}>Measure once</button><button onClick={() => measureMany(100)}>Run 100</button>{measurementHistory.length > 0 && <button className="clear-history" onClick={() => { setMeasurementHistory([]); setMeasurement(null) }}>Clear results</button>}</div></section>
 
-    {menu && circuit[menu.column] && <div className="context-menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}><label>Gate name<input autoFocus value={circuit[menu.column]?.name || ''} placeholder={circuit[menu.column]?.type} onChange={(e) => setCircuit((current) => current.map((gate, index) => index === menu.column && gate ? { ...gate, name: e.target.value } : gate))} /></label><button onClick={() => { setCircuit((current) => current.map((gate, index) => index === menu.column ? null : gate)); setMenu(null) }}>Delete gate</button></div>}
+    {menu && circuit[menu.column] && <div className="context-menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}><label>Gate name<input autoFocus value={circuit[menu.column]?.name || ''} placeholder={circuit[menu.column]?.type} onChange={(e) => commitCircuit((current) => current.map((gate, index) => index === menu.column && gate ? { ...gate, name: e.target.value } : gate))} /></label><button onClick={() => { commitCircuit((current) => current.map((gate, index) => index === menu.column ? null : gate)); setMenu(null) }}>Delete gate</button></div>}
   </main>
 }
 
